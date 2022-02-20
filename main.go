@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -30,108 +31,193 @@ const (
 
 func main() {
 	var baseDir, source, dest, output, ignore string
-	var numConcret int
+	var numConcret, verbose int
 
 	app := &cli.App{
 		Name:    "pjkakuninja",
 		Version: Version,
 		Usage:   "P-WEB確認ジャ！",
-		Flags: []cli.Flag{
-			&cli.IntFlag{
-				Name:        "num-concrent",
-				Aliases:     []string{"c"},
-				Usage:       "並列処理数 `NUM_CONCRENT` を指定します。未指定の場合、CPU数の半分が設定されます。",
-				Destination: &numConcret,
+		Commands: []*cli.Command{
+			{
+				Name:    "check",
+				Aliases: []string{"a"},
+				Usage:   "ファイルマッチング",
+				Flags: []cli.Flag{
+					&cli.IntFlag{
+						Name:        "num-concrent",
+						Aliases:     []string{"c"},
+						Usage:       "並列処理数 `NUM_CONCRENT` を指定します。未指定の場合、CPU数の半分が設定されます。",
+						Destination: &numConcret,
+					},
+					&cli.StringFlag{
+						Name:        "baseDir",
+						Aliases:     []string{"b"},
+						Usage:       "チェック先フォルダのパス `BASE_DIR` を指定します。",
+						Destination: &baseDir,
+						Required:    true,
+					},
+					&cli.StringFlag{
+						Name:        "source",
+						Aliases:     []string{"s"},
+						Usage:       "比較元ファルのパス `SOURCE_FILE_PATH` を指定します。",
+						Destination: &source,
+						Required:    true,
+					},
+					&cli.StringFlag{
+						Name:        "dest",
+						Aliases:     []string{"d"},
+						Usage:       "比較先ファルのパス `DEST_FILE_PATH` を指定します。",
+						Destination: &dest,
+						Required:    true,
+					},
+					&cli.StringFlag{
+						Name:        "output",
+						Aliases:     []string{"o"},
+						Usage:       "データを出力するファイルのパス `OUTPUT_FILE_PATH` を指定します。",
+						Destination: &output,
+						Required:    true,
+					},
+					&cli.StringFlag{
+						Name:        "ignore",
+						Aliases:     []string{"g"},
+						Usage:       "比較元ファイルのファイル名が `IGNORE` を含む場合、除外します。",
+						Destination: &ignore,
+					},
+				},
+				Action: func(c *cli.Context) error {
+					// チェック結果を出力するファイル。既にファイルが存在する場合は削除
+					outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer outFp.Close()
+
+					// チェック結果を書き出す専用のゴルーチン
+					resultsCh := make(chan Unmatch, 50) // アンマッチファイルを書き出すためのチャネル
+					done := make(chan struct{})         // ファイル出力終了を伝えるためのチャネル
+					go writeUnMatchFile(resultsCh, outFp, done)
+
+					// チェック先のファイル
+					destFp, err := os.Open(dest)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer destFp.Close()
+
+					// チェック先ファイルからチェック用のハッシュマップを生成する
+					destMap, err := createDestMap(destFp)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+
+					// チェック元
+					srcFp, err := os.Open(source)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer srcFp.Close()
+					sourceCh := gen(srcFp, baseDir, ignore)
+
+					// NUM_CONCURRENT が未指定の場合は、CPU数の半分とする。
+					if numConcret == 0 {
+						numConcret = runtime.NumCPU() / 2
+					}
+
+					// ワーカーを生成
+					var wg sync.WaitGroup
+					for i := 0; i < numConcret; i++ {
+						wg.Add(1)
+						go worker(sourceCh, destMap, resultsCh, &wg)
+					}
+					wg.Wait()
+
+					// ワーカーがすべて完了すると、resultsCh への送信が完了するのでクローズする
+					close(resultsCh)
+
+					// writeUnMatchFile が完了するまで待機
+					<-done
+
+					return nil
+				},
 			},
-			&cli.StringFlag{
-				Name:        "baseDir",
-				Aliases:     []string{"b"},
-				Usage:       "チェック先フォルダのパス `BASE_DIR` を指定します。",
-				Destination: &baseDir,
-				Required:    true,
+			{
+				Name:    "list",
+				Aliases: []string{"l"},
+				Usage:   "ファイルリスト作成",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:        "baseDir",
+						Aliases:     []string{"b"},
+						Usage:       "チェック先フォルダのパス `BASE_DIR` を指定します。",
+						Destination: &baseDir,
+						Required:    true,
+					},
+					&cli.StringFlag{
+						Name:        "output",
+						Aliases:     []string{"o"},
+						Usage:       "データを出力するファイルのパス `OUTPUT_FILE_PATH` を指定します。",
+						Destination: &output,
+						Required:    true,
+					},
+					&cli.IntFlag{
+						Name:        "verbose",
+						Aliases:     []string{"V"},
+						Usage:       "中間件数の出力件数を指定します。",
+						Destination: &verbose,
+					},
+				},
+				Action: func(c *cli.Context) error {
+					outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer outFp.Close()
+
+					bw := bufio.NewWriter(outFp)
+					defer bw.Flush()
+
+					count := 0
+					err = filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+						if err != nil {
+							return err
+						}
+
+						if path == baseDir {
+							return nil
+						}
+
+						filename := info.Name() // ファイル名
+						ext := ""               // ファイルの拡張子
+						size := info.Size()     // ファイルサイズ
+						folderFlag := "FALSE"
+						if info.IsDir() {
+							folderFlag = "TRUE"
+						}
+						updateDate := info.ModTime().Format("2006/01/02") // 更新日
+						updateTime := info.ModTime().Format("15:04:05")   // 更新時刻
+
+						// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
+						s := fmt.Sprintf("\"%s\",\"%s\",\"%s\",%d,%s,%s,%s\n", filename, path, ext, size, folderFlag, updateDate, updateTime)
+						if _, err := bw.WriteString(s); err != nil {
+							return err
+						}
+
+						count += 1
+						if verbose != 0 && count%verbose == 0 {
+							fmt.Printf("%d 完了...\n", count)
+						}
+
+						return nil
+					})
+
+					if err != nil {
+						return err
+					}
+
+					fmt.Printf("%s のファイルリストの作成完了(件数=%d)\n", baseDir, count)
+					return nil
+				},
 			},
-			&cli.StringFlag{
-				Name:        "source",
-				Aliases:     []string{"s"},
-				Usage:       "比較元ファルのパス `SOURCE_FILE_PATH` を指定します。",
-				Destination: &source,
-				Required:    true,
-			},
-			&cli.StringFlag{
-				Name:        "dest",
-				Aliases:     []string{"d"},
-				Usage:       "比較先ファルのパス `DEST_FILE_PATH` を指定します。",
-				Destination: &dest,
-				Required:    true,
-			},
-			&cli.StringFlag{
-				Name:        "output",
-				Aliases:     []string{"o"},
-				Usage:       "データを出力するファイルのパス `OUTPUT_FILE_PATH` を指定します。",
-				Destination: &output,
-				Required:    true,
-			},
-			&cli.StringFlag{
-				Name:        "ignore",
-				Aliases:     []string{"g"},
-				Usage:       "比較元ファイルのファイル名が `IGNORE` を含む場合、除外します。",
-				Destination: &ignore,
-			},
-		},
-		Action: func(c *cli.Context) error {
-			// チェック結果を出力するファイル。既にファイルが存在する場合は削除
-			outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
-			if err != nil {
-				return cli.Exit(err, 1)
-			}
-			defer outFp.Close()
-
-			// チェック結果を書き出す専用のゴルーチン
-			resultsCh := make(chan Unmatch, 50) // アンマッチファイルを書き出すためのチャネル
-			done := make(chan struct{})         // ファイル出力終了を伝えるためのチャネル
-			go writeUnMatchFile(resultsCh, outFp, done)
-
-			// チェック先のファイル
-			destFp, err := os.Open(dest)
-			if err != nil {
-				return cli.Exit(err, 1)
-			}
-			defer destFp.Close()
-
-			// チェック先ファイルからチェック用のハッシュマップを生成する
-			destMap, err := createDestMap(destFp)
-			if err != nil {
-				return cli.Exit(err, 1)
-			}
-
-			// チェック元
-			srcFp, err := os.Open(source)
-			if err != nil {
-				return cli.Exit(err, 1)
-			}
-			defer srcFp.Close()
-			sourceCh := gen(srcFp, baseDir, ignore)
-
-			// NUM_CONCURRENT が未指定の場合は、CPU数の半分とする。
-			if numConcret == 0 {
-				numConcret = runtime.NumCPU() / 2
-			}
-
-			// ワーカーを生成
-			var wg sync.WaitGroup
-			for i := 0; i < numConcret; i++ {
-				wg.Add(1)
-				go worker(sourceCh, destMap, resultsCh, &wg)
-			}
-			wg.Wait()
-
-			// ワーカーがすべて完了すると、resultsCh への送信が完了するのでクローズする
-			close(resultsCh)
-
-			// writeUnMatchFile が完了するまで待機
-			<-done
-
-			return nil
 		},
 	}
 
