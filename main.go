@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/saracen/walker"
 	"github.com/urfave/cli/v2"
 )
 
@@ -167,21 +168,11 @@ func main() {
 					},
 				},
 				Action: func(c *cli.Context) error {
-					outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
-					if err != nil {
-						return cli.Exit(err, 1)
-					}
-					defer outFp.Close()
+					filelistCh := make(chan string, 50)
+					done := make(chan struct{})
+					go writeFilePathList(filelistCh, output, done, verbose)
 
-					bw := bufio.NewWriter(outFp)
-					defer bw.Flush()
-
-					count := 0
-					err = filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
-						if err != nil {
-							return err
-						}
-
+					err := walker.Walk(baseDir, func(path string, info os.FileInfo) error {
 						if path == baseDir {
 							return nil
 						}
@@ -197,24 +188,19 @@ func main() {
 						updateTime := info.ModTime().Format("15:04:05")   // 更新時刻
 
 						// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
-						s := fmt.Sprintf("\"%s\",\"%s\",\"%s\",%d,%s,%s,%s\n", filename, path, ext, size, folderFlag, updateDate, updateTime)
-						if _, err := bw.WriteString(s); err != nil {
-							return err
-						}
-
-						count += 1
-						if verbose != 0 && count%verbose == 0 {
-							fmt.Printf("%d 完了...\n", count)
-						}
+						s := fmt.Sprintf("\"%s\",\"%s\",\"%s\",%d,%s,%s,%s", filename, path, ext, size, folderFlag, updateDate, updateTime)
+						filelistCh <- s
 
 						return nil
 					})
+					close(filelistCh)
 
 					if err != nil {
 						return err
 					}
 
-					fmt.Printf("%s のファイルリストの作成完了(件数=%d)\n", baseDir, count)
+					<-done
+
 					return nil
 				},
 			},
@@ -403,4 +389,38 @@ func newBufioReader(r io.Reader) *bufio.Reader {
 		br.Discard(3)
 	}
 	return br
+}
+
+func writeFilePathList(filepathCh <-chan string, outfile string, done chan<- struct{}, verbose int) error {
+	// 書き出し完了を表すチャネルをクローズする
+	defer close(done)
+
+	count := 0
+
+	outFp, err := os.OpenFile(outfile, os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer outFp.Close()
+
+	bw := bufio.NewWriter(outFp)
+	defer bw.Flush()
+
+	// resultsCh が close するまで繰り返す
+	for p := range filepathCh {
+		if _, err := bw.WriteString(fmt.Sprintf("%s\n", p)); err != nil {
+			return err
+		}
+		count += 1
+		if verbose != 0 && count%verbose == 0 {
+			fmt.Printf("%d 件完了...\n", count)
+		}
+
+	}
+
+	// 結果を出力
+	fmt.Println("◆ファイルリストの出力を完了しました。")
+	fmt.Printf("　→出力件数 : %d\n", count)
+
+	return nil
 }
