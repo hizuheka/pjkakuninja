@@ -253,10 +253,8 @@ func createDestMap(r io.Reader) (map[string]string, error) {
 			continue
 		}
 
-		// パスの区切りは「/」とする
-		p := strings.Replace(ary[1], "\\", "/", -1)
-		// ファイルパスが”で括られているので削除する
-		p = strings.Replace(p, "\"", "", -1)
+		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
+		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
 		m[p] = ary[3]
 
 		add += 1
