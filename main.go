@@ -29,7 +29,7 @@ const (
 )
 
 func main() {
-	var baseDir, source, dest, output string
+	var baseDir, source, dest, output, ignore string
 	var numConcret int
 
 	app := &cli.App{
@@ -71,6 +71,12 @@ func main() {
 				Destination: &output,
 				Required:    true,
 			},
+			&cli.StringFlag{
+				Name:        "ignore",
+				Aliases:     []string{"g"},
+				Usage:       "比較元ファイルのファイル名が `IGNORE` を含む場合、除外します。",
+				Destination: &ignore,
+			},
 		},
 		Action: func(c *cli.Context) error {
 			// チェック結果を出力するファイル。既にファイルが存在する場合は削除
@@ -104,7 +110,7 @@ func main() {
 				return cli.Exit(err, 1)
 			}
 			defer srcFp.Close()
-			sourceCh := gen(srcFp, baseDir)
+			sourceCh := gen(srcFp, baseDir, ignore)
 
 			// NUM_CONCURRENT が未指定の場合は、CPU数の半分とする。
 			if numConcret == 0 {
@@ -137,7 +143,7 @@ func main() {
 
 // r で指定されたファイルから、チェック用のマップを生成する。
 // r の1行は次の構成。
-// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合true),更新日,更新時刻
+// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
 func createDestMap(r io.Reader) (map[string]string, error) {
 	m := make(map[string]string)
 	var read, skip, add uint
@@ -155,8 +161,8 @@ func createDestMap(r io.Reader) (map[string]string, error) {
 			return nil, fmt.Errorf("テンポラリストレージのファイルリストのフォーマット不正. len=%d", len(ary))
 		}
 
-		// サイズが0の場合はチェック対象外のためスキップする
-		if ary[3] == "0" {
+		// フォルダフラグが "TRUE" の場合はチェック対象外のためスキップする
+		if ary[4] == "TRUE" {
 			skip += 1
 			continue
 		}
@@ -179,7 +185,7 @@ func createDestMap(r io.Reader) (map[string]string, error) {
 	fmt.Println("◆チェック先ファイル(DEST_FILE_PATH)の読み込みを完了しました。")
 	fmt.Printf("　→読み込み件数 : %d\n", read)
 	fmt.Printf("　→検索用ファイル件数 : %d\n", add)
-	fmt.Printf("　→スキップ件数(サイズ=0) : %d\n", skip)
+	fmt.Printf("　→スキップ件数(ディレクトリ) : %d\n", skip)
 
 	return m, nil
 }
@@ -187,14 +193,11 @@ func createDestMap(r io.Reader) (map[string]string, error) {
 // rで指定されたファイルを1行ずつ読み込み、File のチャネルを生成する。
 // rの1行の構成は次の通り。
 // "プロジェクト名","カテゴリ","サブカテゴリ",ファイルパス,ファイルサイズ
-func gen(r io.Reader, prifix string) <-chan File {
+func gen(r io.Reader, prifix, ignore string) <-chan File {
 	out := make(chan File, 50) // バッファ数50の根拠はなし
 
-	// 「\」を「/」に置換する。置換した結果、末尾に「/」がない場合は付加する。
-	p := strings.Replace(prifix, "\\", "/", -1)
-	if !strings.HasSuffix(p, "/") {
-		p = p + "/"
-	}
+	b := newBufioReader(r)
+	p := modifySourcePathPrifix(prifix)
 
 	go func(br *bufio.Reader, p string) {
 		defer close(out)
@@ -207,8 +210,8 @@ func gen(r io.Reader, prifix string) <-chan File {
 
 			ary := strings.Split(scanner.Text(), ",")
 
-			// ファイルサイズが0は無視する。
-			if p == "0" {
+			// 無視するファイルのチェック
+			if ignore != "" && strings.Contains(ary[3], ignore) {
 				skip += 1
 				continue
 			}
@@ -233,11 +236,20 @@ func gen(r io.Reader, prifix string) <-chan File {
 		// ファイル読み込み結果を出力する。
 		fmt.Println("◆チェック元ファイル(SOURCE_FILE_PATH)の読み込みを完了しました。")
 		fmt.Printf("　→読み込み件数 : %d\n", read)
-		fmt.Printf("　→検索用ファイル件数 : %d\n", add)
-		fmt.Printf("　→スキップ件数(サイズ=0) : %d\n", skip)
-	}(bufio.NewReader(r), p)
+		fmt.Printf("　→スキップ件数 : %d\n", skip)
+		fmt.Printf("　→検索対象ファイル件数 : %d\n", add)
+	}(b, p)
 
 	return out
+}
+
+// s の "\" を "/" に置換する。置換した結果、末尾に "/" がない場合は付加する。
+func modifySourcePathPrifix(s string) string {
+	prifix := strings.Replace(s, "\\", "/", -1)
+	if !strings.HasSuffix(prifix, "/") {
+		prifix = prifix + "/"
+	}
+	return prifix
 }
 
 // ワーカー
@@ -276,7 +288,7 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 
 	// resultsCh が close するまで繰り返す
 	for p := range resultsCh {
-		if _, err := bw.WriteString(fmt.Sprintf("%s:%s\n", p.reason, p.path)); err != nil {
+		if _, err := bw.WriteString(fmt.Sprintf("%s,%s\n", p.reason, p.path)); err != nil {
 			return err
 		}
 		write += 1
@@ -295,4 +307,16 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 	fmt.Printf("　→サイズ不一致 : %d\n", sizeunmatch)
 
 	return nil
+}
+
+func newBufioReader(r io.Reader) *bufio.Reader {
+	br := bufio.NewReader(r)
+	bs, err := br.Peek(3)
+	if err != nil {
+		return br
+	}
+	if bs[0] == 0xEF && bs[1] == 0xBB && bs[2] == 0xBF {
+		br.Discard(3)
+	}
+	return br
 }
