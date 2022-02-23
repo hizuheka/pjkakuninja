@@ -20,10 +20,14 @@ type File struct {
 	size string // ファイルサイズ
 }
 
+type Size struct {
+	before string
+	after  string
+}
+
 type Unmatch struct {
-	path     string // ファイルのパス
-	reason   string // 不一致理由
-	sizediff int    // サイズ差
+	path   string // ファイルのパス
+	reason string // 不一致理由
 }
 
 const (
@@ -32,7 +36,7 @@ const (
 )
 
 func main() {
-	var baseDir, source, dest, output, ignore string
+	var baseDir, source, dest, destAf, output, ignore string
 	var numConcret, verbose int
 
 	app := &cli.App{
@@ -49,6 +53,7 @@ func main() {
 					opsBaseDir(&baseDir),
 					opsSource(&source),
 					opsDest(&dest),
+					opsDestAf(&destAf),
 					opsOutput(&output),
 					opsIgnore(&ignore),
 				},
@@ -66,7 +71,7 @@ func main() {
 					go writeUnMatchFile(resultsCh, outFp, done)
 
 					// チェック先ファイルからチェック用のハッシュマップを生成する
-					destMap, err := generateDestMapFromTempFileListPath(dest)
+					destMap, err := generateDestMapFromTempFileListPath(dest, destAf)
 					if err != nil {
 						return cli.Exit(err, 1)
 					}
@@ -233,46 +238,97 @@ func main() {
 // r で指定されたファイルから、チェック用のマップを生成する。
 // r の1行は次の構成。
 // "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
-func generateDestMapFromTempFileList(r io.Reader) (map[string]string, error) {
-	m := make(map[string]string)
-	var read, skip, add uint
+func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*Size, error) {
+	m := make(map[string]*Size)
+	var readBe, skipBe, addBe uint
 
-	s := bufio.NewScanner(r)
-	for s.Scan() {
-		read += 1
-		if s.Text() == "" {
-			skip += 1
+	// 処理前ファイル
+	sBe := bufio.NewScanner(rBe)
+	for sBe.Scan() {
+		readBe += 1
+		if sBe.Text() == "" {
+			skipBe += 1
 			continue
 		}
 
-		ary := strings.Split(s.Text(), ",")
+		ary := strings.Split(sBe.Text(), ",")
 		if len(ary) != 7 {
 			return nil, fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
 		}
 
 		// フォルダフラグが "TRUE" の場合はチェック対象外のためスキップする
 		if ary[4] == "TRUE" {
-			skip += 1
+			skipBe += 1
 			continue
 		}
 
 		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
-		m[p] = ary[3]
+		m[p] = &Size{ary[3], ""}
 
-		add += 1
+		addBe += 1
 	}
 
-	if s.Err() != nil {
+	if sBe.Err() != nil {
 		// non-EOF error.
-		return nil, s.Err()
+		return nil, sBe.Err()
+	}
+
+	fmt.Println("◆チェック先ファイル(DEST_FILE_PATH)の読み込みを完了しました。")
+	fmt.Printf("　→ファイル読み込み件数 : %d\n", readBe)
+	fmt.Printf("　→検索用ファイル件数 : %d\n", addBe)
+	fmt.Printf("　→スキップ件数(ディレクトリ) : %d\n", skipBe)
+
+	return m, nil
+}
+
+func updateDestMapFromTempFileList(m map[string]*Size, rAf io.Reader) (map[string]*Size, error) {
+	var readAf, skipAf, addAf, updateAf uint
+
+	// 処理後ファイル
+	sAf := bufio.NewScanner(rAf)
+	for sAf.Scan() {
+		readAf += 1
+		if sAf.Text() == "" {
+			skipAf += 1
+			continue
+		}
+
+		ary := strings.Split(sAf.Text(), ",")
+		if len(ary) != 7 {
+			return nil, fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
+		}
+
+		// フォルダフラグが "TRUE" の場合はチェック対象外のためスキップする
+		if ary[4] == "TRUE" {
+			skipAf += 1
+			continue
+		}
+
+		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
+		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
+		s := ary[3]
+
+		if v, ok := m[p]; ok {
+			v.after = s
+			updateAf += 1
+		} else {
+			m[p] = &Size{"", s}
+			addAf += 1
+		}
+	}
+
+	if sAf.Err() != nil {
+		// non-EOF error.
+		return nil, sAf.Err()
 	}
 
 	// ファイル読み込み結果を出力
-	fmt.Println("◆チェック先ファイル(DEST_FILE_PATH)の読み込みを完了しました。")
-	fmt.Printf("　→読み込み件数 : %d\n", read)
-	fmt.Printf("　→検索用ファイル件数 : %d\n", add)
-	fmt.Printf("　→スキップ件数(ディレクトリ) : %d\n", skip)
+	fmt.Println("◆チェック先ファイル(処理後)(DEST_FILE_AFTER_PATH)の読み込みを完了しました。")
+	fmt.Printf("　→ファイル読み込み件数 : %d\n", readAf)
+	fmt.Printf("　→更新件数 : %d\n", updateAf)
+	fmt.Printf("　→追加件数 : %d\n", addAf)
+	fmt.Printf("　→スキップ件数(ディレクトリ) : %d\n", skipAf)
 
 	return m, nil
 }
@@ -281,8 +337,8 @@ func generateDestMapFromTempFileList(r io.Reader) (map[string]string, error) {
 // r の1行は次の構成。
 // 0:          1:               2:      3:              4:                                           5:
 // "ファイル名","更新日 更新時刻","更新者","ファイルサイズ","ファイル区分(フォルダ=Folder、ファイル=File)","格納フォルダのパス"
-func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]string, error) {
-	m := make(map[string]string)
+func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*Size, error) {
+	m := make(map[string]*Size)
 	var read, skip, add uint
 	const SD = "Shared Documents"
 
@@ -319,7 +375,7 @@ func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]stri
 		// ファイルサイズ
 		size := strings.Replace(ary[3], "\"", "", -1) // "を削除
 
-		m[path] = size
+		m[path] = &Size{size, ""}
 
 		add += 1
 	}
@@ -459,16 +515,15 @@ func modifySourcePathPrifix(s string) string {
 }
 
 // ワーカー
-func worker(fileCh <-chan File, destMap map[string]string, resultsCh chan<- Unmatch, wg *sync.WaitGroup) {
+func worker(fileCh <-chan File, destMap map[string]*Size, resultsCh chan<- Unmatch, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	// タスクがなくなってタスクのチェネルがcloseされるまで無限ループ
 	for f := range fileCh {
 		isExist := true
 		msg := ""
-		sizediff := 0
 		if v, ok := destMap[f.path]; ok {
-			if v != f.size {
+			if v.before != f.size && v.after != f.size {
 				isExist = false
 				msg = UnmatchReasonSizeUnmatch
 			}
@@ -478,7 +533,7 @@ func worker(fileCh <-chan File, destMap map[string]string, resultsCh chan<- Unma
 		}
 
 		if !isExist {
-			resultsCh <- Unmatch{f.path, msg, sizediff}
+			resultsCh <- Unmatch{f.path, msg}
 			// fmt.Printf("%s:%s\n", msg, f.path)
 		}
 	}
@@ -496,7 +551,7 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 
 	// resultsCh が close するまで繰り返す
 	for p := range resultsCh {
-		if _, err := bw.WriteString(fmt.Sprintf("%s,%s,%d\n", p.reason, p.path, p.sizediff)); err != nil {
+		if _, err := bw.WriteString(fmt.Sprintf("%s,%s\n", p.reason, p.path)); err != nil {
 			return err
 		}
 		write += 1
@@ -602,6 +657,15 @@ func opsDest(d *string) *cli.StringFlag {
 	}
 }
 
+func opsDestAf(d *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "destAf",
+		Aliases:     []string{"a"},
+		Usage:       "比較先ファル(処理後)のパス `DEST_FILE_AFTER_PATH` を指定します。",
+		Destination: d,
+	}
+}
+
 func opsOutput(o *string) *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:        "output",
@@ -621,24 +685,39 @@ func opsIgnore(g *string) *cli.StringFlag {
 	}
 }
 
-func generateDestMapFromTempFileListPath(path string) (map[string]string, error) {
-	// チェック先のファイル
-	destFp, err := os.Open(path)
+func generateDestMapFromTempFileListPath(pathBefore, pathAfter string) (map[string]*Size, error) {
+	// チェック先(処理前)のファイル
+	destBeFp, err := os.Open(pathBefore)
 	if err != nil {
 		return nil, err
 	}
-	defer destFp.Close()
+	defer destBeFp.Close()
 
 	// チェック先ファイルからチェック用のハッシュマップを生成する
-	destMap, err := generateDestMapFromTempFileList(destFp)
+	destMap, err := generateDestMapFromTempFileList(destBeFp)
 	if err != nil {
 		return nil, err
+	}
+
+	// チェック先(処理後)のファイル
+	if pathAfter != "" {
+		var destAfFp *os.File
+		destAfFp, err := os.Open(pathAfter)
+		if err != nil {
+			return nil, err
+		}
+		defer destAfFp.Close()
+
+		destMap, err = updateDestMapFromTempFileList(destMap, destAfFp)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return destMap, nil
 }
 
-func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]string, error) {
+func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]*Size, error) {
 	// チェック先のファイル
 	destFp, err := os.Open(path)
 	if err != nil {
