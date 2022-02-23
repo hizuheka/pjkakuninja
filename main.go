@@ -21,8 +21,9 @@ type File struct {
 }
 
 type Unmatch struct {
-	path   string // ファイルのパス
-	reason string // 不一致理由
+	path     string // ファイルのパス
+	reason   string // 不一致理由
+	sizediff int    // サイズ差
 }
 
 const (
@@ -40,50 +41,16 @@ func main() {
 		Usage:   "P-WEB確認ジャ！",
 		Commands: []*cli.Command{
 			{
-				Name:    "check",
+				Name:    "check-temp",
 				Aliases: []string{"a"},
-				Usage:   "ファイルマッチング",
+				Usage:   "TEMPストレージのファイルマッチング",
 				Flags: []cli.Flag{
-					&cli.IntFlag{
-						Name:        "num-concrent",
-						Aliases:     []string{"c"},
-						Usage:       "並列処理数 `NUM_CONCRENT` を指定します。未指定の場合、CPU数の半分が設定されます。",
-						Destination: &numConcret,
-					},
-					&cli.StringFlag{
-						Name:        "baseDir",
-						Aliases:     []string{"b"},
-						Usage:       "チェック先フォルダのパス `BASE_DIR` を指定します。",
-						Destination: &baseDir,
-						Required:    true,
-					},
-					&cli.StringFlag{
-						Name:        "source",
-						Aliases:     []string{"s"},
-						Usage:       "比較元ファルのパス `SOURCE_FILE_PATH` を指定します。",
-						Destination: &source,
-						Required:    true,
-					},
-					&cli.StringFlag{
-						Name:        "dest",
-						Aliases:     []string{"d"},
-						Usage:       "比較先ファルのパス `DEST_FILE_PATH` を指定します。",
-						Destination: &dest,
-						Required:    true,
-					},
-					&cli.StringFlag{
-						Name:        "output",
-						Aliases:     []string{"o"},
-						Usage:       "データを出力するファイルのパス `OUTPUT_FILE_PATH` を指定します。",
-						Destination: &output,
-						Required:    true,
-					},
-					&cli.StringFlag{
-						Name:        "ignore",
-						Aliases:     []string{"g"},
-						Usage:       "比較元ファイルのファイル名が `IGNORE` を含む場合、除外します。",
-						Destination: &ignore,
-					},
+					opsNumConcent(&numConcret),
+					opsBaseDir(&baseDir),
+					opsSource(&source),
+					opsDest(&dest),
+					opsOutput(&output),
+					opsIgnore(&ignore),
 				},
 				Action: func(c *cli.Context) error {
 					// チェック結果を出力するファイル。既にファイルが存在する場合は削除
@@ -98,15 +65,8 @@ func main() {
 					done := make(chan struct{})         // ファイル出力終了を伝えるためのチャネル
 					go writeUnMatchFile(resultsCh, outFp, done)
 
-					// チェック先のファイル
-					destFp, err := os.Open(dest)
-					if err != nil {
-						return cli.Exit(err, 1)
-					}
-					defer destFp.Close()
-
 					// チェック先ファイルからチェック用のハッシュマップを生成する
-					destMap, err := createDestMap(destFp)
+					destMap, err := generateDestMapFromTempFileListPath(dest)
 					if err != nil {
 						return cli.Exit(err, 1)
 					}
@@ -117,16 +77,14 @@ func main() {
 						return cli.Exit(err, 1)
 					}
 					defer srcFp.Close()
-					sourceCh := gen(srcFp, baseDir, ignore)
+					sourceCh := generateSourceFromPJFileList(srcFp, baseDir, ignore)
 
 					// NUM_CONCURRENT が未指定の場合は、CPU数の半分とする。
-					if numConcret == 0 {
-						numConcret = runtime.NumCPU() / 2
-					}
+					newNumConcrent := getNumConcrent(numConcret)
 
 					// ワーカーを生成
 					var wg sync.WaitGroup
-					for i := 0; i < numConcret; i++ {
+					for i := 0; i < newNumConcrent; i++ {
 						wg.Add(1)
 						go worker(sourceCh, destMap, resultsCh, &wg)
 					}
@@ -204,6 +162,65 @@ func main() {
 					return nil
 				},
 			},
+			{
+				Name:    "check-spo",
+				Aliases: []string{"a"},
+				Usage:   "SPOのファイルマッチング",
+				Flags: []cli.Flag{
+					opsNumConcent(&numConcret),
+					opsBaseDir(&baseDir),
+					opsSource(&source),
+					opsDest(&dest),
+					opsOutput(&output),
+					opsIgnore(&ignore),
+				},
+				Action: func(c *cli.Context) error {
+					// チェック結果を出力するファイル。既にファイルが存在する場合は削除
+					outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer outFp.Close()
+
+					// チェック結果を書き出す専用のゴルーチン
+					resultsCh := make(chan Unmatch, 50) // アンマッチファイルを書き出すためのチャネル
+					done := make(chan struct{})         // ファイル出力終了を伝えるためのチャネル
+					go writeUnMatchFile(resultsCh, outFp, done)
+
+					// チェック先ファイルからチェック用のハッシュマップを生成する
+					destMap, err := generateDestMapFromSPOFileListPath(dest, baseDir)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+
+					// チェック元
+					srcFp, err := os.Open(source)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer srcFp.Close()
+					sourceCh := generateSourceFromTempFileList(srcFp, ignore)
+
+					// NUM_CONCURRENT が未指定の場合は、CPU数の半分とする。
+					newNumConcrent := getNumConcrent(numConcret)
+
+					// ワーカーを生成
+					var wg sync.WaitGroup
+					for i := 0; i < newNumConcrent; i++ {
+						wg.Add(1)
+						go worker(sourceCh, destMap, resultsCh, &wg)
+					}
+					wg.Wait()
+
+					// ワーカーがすべて完了すると、resultsCh への送信が完了するのでクローズする
+					close(resultsCh)
+
+					// writeUnMatchFile が完了するまで待機
+					<-done
+
+					return nil
+				},
+			},
 		},
 	}
 
@@ -216,7 +233,7 @@ func main() {
 // r で指定されたファイルから、チェック用のマップを生成する。
 // r の1行は次の構成。
 // "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
-func createDestMap(r io.Reader) (map[string]string, error) {
+func generateDestMapFromTempFileList(r io.Reader) (map[string]string, error) {
 	m := make(map[string]string)
 	var read, skip, add uint
 
@@ -230,7 +247,7 @@ func createDestMap(r io.Reader) (map[string]string, error) {
 
 		ary := strings.Split(s.Text(), ",")
 		if len(ary) != 7 {
-			return nil, fmt.Errorf("テンポラリストレージのファイルリストのフォーマット不正. len=%d", len(ary))
+			return nil, fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
 		}
 
 		// フォルダフラグが "TRUE" の場合はチェック対象外のためスキップする
@@ -260,10 +277,71 @@ func createDestMap(r io.Reader) (map[string]string, error) {
 	return m, nil
 }
 
+// r で指定されたファイルから、チェック用のマップを生成する。
+// r の1行は次の構成。
+// 0:          1:               2:      3:              4:                                           5:
+// "ファイル名","更新日 更新時刻","更新者","ファイルサイズ","ファイル区分(フォルダ=Folder、ファイル=File)","格納フォルダのパス"
+func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]string, error) {
+	m := make(map[string]string)
+	var read, skip, add uint
+	const SD = "Shared Documents"
+
+	p := modifySourcePathPrifix(prifix)
+
+	b := newBufioReader(r)
+	s := bufio.NewScanner(b)
+
+	for s.Scan() {
+		read += 1
+
+		// 1行目は項目名なのでスキップ
+		if read == 1 {
+			skip += 1
+			continue
+		}
+
+		ary := strings.Split(s.Text(), ",")
+		if len(ary) != 6 {
+			return nil, fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
+		}
+
+		// ファイル区分が "Folder" の場合はチェック対象外のためスキップする
+		if ary[4] == "Folder" {
+			skip += 1
+			continue
+		}
+
+		// ファイルパスの生成
+		pathAndFile := strings.Replace(ary[5]+"/"+ary[0], "\"", "", -1) // "を削除
+		startIndex := strings.Index(pathAndFile, SD) + len(SD) + 1
+		path := p + pathAndFile[startIndex:]
+
+		// ファイルサイズ
+		size := strings.Replace(ary[3], "\"", "", -1) // "を削除
+
+		m[path] = size
+
+		add += 1
+	}
+
+	if s.Err() != nil {
+		// non-EOF error.
+		return nil, s.Err()
+	}
+
+	// ファイル読み込み結果を出力
+	fmt.Println("◆チェック先ファイル(DEST_FILE_PATH)の読み込みを完了しました。")
+	fmt.Printf("　→読み込み件数 : %d\n", read)
+	fmt.Printf("　→検索用ファイル件数 : %d\n", add)
+	fmt.Printf("　→スキップ件数: %d\n", skip)
+
+	return m, nil
+}
+
 // rで指定されたファイルを1行ずつ読み込み、File のチャネルを生成する。
 // rの1行の構成は次の通り。
 // "プロジェクト名","カテゴリ","サブカテゴリ",ファイルパス,ファイルサイズ
-func gen(r io.Reader, prifix, ignore string) <-chan File {
+func generateSourceFromPJFileList(r io.Reader, prifix, ignore string) <-chan File {
 	out := make(chan File, 50) // バッファ数50の根拠はなし
 
 	b := newBufioReader(r)
@@ -313,6 +391,64 @@ func gen(r io.Reader, prifix, ignore string) <-chan File {
 	return out
 }
 
+// rで指定されたファイルを1行ずつ読み込み、File のチャネルを生成する。
+// rの1行の構成は次の通り。
+// 0:          1:                  2:               3:            4:                              5:     6:
+// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
+func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
+	out := make(chan File, 50) // バッファ数50の根拠はなし
+
+	b := newBufioReader(r)
+
+	go func(br *bufio.Reader) {
+		defer close(out)
+
+		var read, dirSkip, ingSkip, add uint
+
+		scanner := bufio.NewScanner(br)
+		for scanner.Scan() {
+			read += 1
+
+			ary := strings.Split(scanner.Text(), ",")
+
+			// フォルダフラグが "TRUE" の場合はチェック対象外のためスキップする
+			if ary[4] == "TRUE" {
+				dirSkip += 1
+				continue
+			}
+
+			// 無視するファイルのチェック
+			if ignore != "" && strings.Contains(ary[1], ignore) {
+				ingSkip += 1
+				continue
+			}
+
+			// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
+			p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
+
+			out <- File{p, ary[3]}
+			add += 1
+		}
+
+		// 横着してエラーメッセージの出力のみで終わっている。。。
+		// 本当は、ワーカーやファイル出力のゴルーチンを終了させる必要がある。
+		if scanner.Err() != nil {
+			// non-EOF error.
+			fmt.Printf("チェック元ファイルの読み込みでエラーが発生しました.(%s)\n", scanner.Err())
+			return
+		}
+
+		// ファイル読み込み結果を出力する。
+		fmt.Println("◆チェック元ファイル(SOURCE_FILE_PATH)の読み込みを完了しました。")
+		fmt.Printf("　→読み込み件数 : %d\n", read)
+		fmt.Printf("　→スキップ件数(フォルダ) : %d\n", dirSkip)
+		fmt.Printf("　→スキップ件数(無視ファイル) : %d\n", ingSkip)
+		fmt.Printf("　→検索対象ファイル件数 : %d\n", add)
+	}(b)
+
+	return out
+}
+
 // s の "\" を "/" に置換する。置換した結果、末尾に "/" がない場合は付加する。
 func modifySourcePathPrifix(s string) string {
 	prifix := strings.Replace(s, "\\", "/", -1)
@@ -325,10 +461,12 @@ func modifySourcePathPrifix(s string) string {
 // ワーカー
 func worker(fileCh <-chan File, destMap map[string]string, resultsCh chan<- Unmatch, wg *sync.WaitGroup) {
 	defer wg.Done()
+
 	// タスクがなくなってタスクのチェネルがcloseされるまで無限ループ
 	for f := range fileCh {
 		isExist := true
 		msg := ""
+		sizediff := 0
 		if v, ok := destMap[f.path]; ok {
 			if v != f.size {
 				isExist = false
@@ -340,7 +478,7 @@ func worker(fileCh <-chan File, destMap map[string]string, resultsCh chan<- Unma
 		}
 
 		if !isExist {
-			resultsCh <- Unmatch{f.path, msg}
+			resultsCh <- Unmatch{f.path, msg, sizediff}
 			// fmt.Printf("%s:%s\n", msg, f.path)
 		}
 	}
@@ -358,7 +496,7 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 
 	// resultsCh が close するまで繰り返す
 	for p := range resultsCh {
-		if _, err := bw.WriteString(fmt.Sprintf("%s,%s\n", p.reason, p.path)); err != nil {
+		if _, err := bw.WriteString(fmt.Sprintf("%s,%s,%d\n", p.reason, p.path, p.sizediff)); err != nil {
 			return err
 		}
 		write += 1
@@ -423,4 +561,104 @@ func writeFilePathList(filepathCh <-chan string, outfile string, done chan<- str
 	fmt.Printf("　→出力件数 : %d\n", count)
 
 	return nil
+}
+
+func opsNumConcent(n *int) *cli.IntFlag {
+	return &cli.IntFlag{
+		Name:        "num-concrent",
+		Aliases:     []string{"c"},
+		Usage:       "並列処理数 `NUM_CONCRENT` を指定します。未指定の場合、CPU数の半分が設定されます。",
+		Destination: n,
+	}
+}
+
+func opsBaseDir(b *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "baseDir",
+		Aliases:     []string{"b"},
+		Usage:       "チェック先フォルダのパス `BASE_DIR` を指定します。",
+		Destination: b,
+		Required:    true,
+	}
+
+}
+func opsSource(s *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "source",
+		Aliases:     []string{"s"},
+		Usage:       "比較元ファルのパス `SOURCE_FILE_PATH` を指定します。",
+		Destination: s,
+		Required:    true,
+	}
+}
+
+func opsDest(d *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "dest",
+		Aliases:     []string{"d"},
+		Usage:       "比較先ファルのパス `DEST_FILE_PATH` を指定します。",
+		Destination: d,
+		Required:    true,
+	}
+}
+
+func opsOutput(o *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "output",
+		Aliases:     []string{"o"},
+		Usage:       "データを出力するファイルのパス `OUTPUT_FILE_PATH` を指定します。",
+		Destination: o,
+		Required:    true,
+	}
+}
+
+func opsIgnore(g *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "ignore",
+		Aliases:     []string{"g"},
+		Usage:       "比較元ファイルのファイル名が `IGNORE` を含む場合、除外します。",
+		Destination: g,
+	}
+}
+
+func generateDestMapFromTempFileListPath(path string) (map[string]string, error) {
+	// チェック先のファイル
+	destFp, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer destFp.Close()
+
+	// チェック先ファイルからチェック用のハッシュマップを生成する
+	destMap, err := generateDestMapFromTempFileList(destFp)
+	if err != nil {
+		return nil, err
+	}
+
+	return destMap, nil
+}
+
+func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]string, error) {
+	// チェック先のファイル
+	destFp, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer destFp.Close()
+
+	// チェック先ファイルからチェック用のハッシュマップを生成する
+	destMap, err := generateDestMapFromSPOFileList(destFp, prefix)
+	if err != nil {
+		return nil, err
+	}
+
+	return destMap, nil
+}
+
+// NUM_CONCURRENT が未指定の場合は、CPU数の半分とする。
+func getNumConcrent(n int) int {
+	if n > 0 {
+		return n
+	}
+	return runtime.NumCPU() / 2
 }
