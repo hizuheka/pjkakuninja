@@ -8,21 +8,26 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/saracen/walker"
 	"github.com/urfave/cli/v2"
 )
 
 type File struct {
-	path string // ファイルパス
-	size string // ファイルサイズ
+	path         string    // ファイルパス
+	size         int       // ファイルサイズ
+	dateModified time.Time // 更新日時
 }
 
-type Size struct {
-	before string
-	after  string
+type SizeAndDateModified struct {
+	beforeSize         int
+	beforeDateModified time.Time
+	afterSize          int
+	afterDateModified  time.Time
 }
 
 type Unmatch struct {
@@ -31,14 +36,16 @@ type Unmatch struct {
 }
 
 const (
-	UnmatchReasonNonExist    = "ファイルなし"
-	UnmatchReasonSizeUnmatch = "ファイルサイズ不一致"
-	UnmatchReasonSizeShrink  = "ファイルサイズ縮小"
+	UnmatchReasonNonExist          = "ファイルなし"
+	UnmatchReasonSizeUnmatch       = "ファイルサイズ不一致"
+	UnmatchReasonSizeShrink        = "ファイルサイズ縮小"
+	UnmatchReasonDateModifiedError = "ファイル更新日時エラー"
 )
 
 const (
-	compareModeEq = iota
-	compareModeGe // 以上なら真
+	compareModeSizeEq         = iota // サイズ一致
+	compareModeSizeGe                // サイズ以上なら真
+	compareModeSizeGeAndModGe        // サイズ一致 & 更新日時未来
 )
 
 func main() {
@@ -97,7 +104,7 @@ func main() {
 					var wg sync.WaitGroup
 					for i := 0; i < newNumConcrent; i++ {
 						wg.Add(1)
-						go worker(sourceCh, destMap, resultsCh, compareModeGe, &wg)
+						go worker(sourceCh, destMap, resultsCh, compareModeSizeGe, &wg)
 					}
 					wg.Wait()
 
@@ -219,7 +226,7 @@ func main() {
 					var wg sync.WaitGroup
 					for i := 0; i < newNumConcrent; i++ {
 						wg.Add(1)
-						go worker(sourceCh, destMap, resultsCh, compareModeGe, &wg)
+						go worker(sourceCh, destMap, resultsCh, compareModeSizeGeAndModGe, &wg)
 					}
 					wg.Wait()
 
@@ -244,8 +251,8 @@ func main() {
 // r で指定されたファイルから、チェック用のマップを生成する。
 // r の1行は次の構成。
 // "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
-func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*Size, error) {
-	m := make(map[string]*Size)
+func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*SizeAndDateModified, error) {
+	m := make(map[string]*SizeAndDateModified)
 	var readBe, skipBe, addBe uint
 
 	// 処理前ファイル
@@ -270,7 +277,8 @@ func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*Size, error) {
 
 		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
-		m[p] = &Size{ary[3], ""}
+		size, _ := strconv.Atoi(ary[3])
+		m[p] = &SizeAndDateModified{size, time.Time{}, 0, time.Time{}}
 
 		addBe += 1
 	}
@@ -288,7 +296,7 @@ func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*Size, error) {
 	return m, nil
 }
 
-func updateDestMapFromTempFileList(m map[string]*Size, rAf io.Reader) (map[string]*Size, error) {
+func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Reader) (map[string]*SizeAndDateModified, error) {
 	var readAf, skipAf, addAf, updateAf uint
 
 	// 処理後ファイル
@@ -313,13 +321,13 @@ func updateDestMapFromTempFileList(m map[string]*Size, rAf io.Reader) (map[strin
 
 		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
-		s := ary[3]
+		s, _ := strconv.Atoi(ary[3])
 
 		if v, ok := m[p]; ok {
-			v.after = s
+			v.afterSize = s
 			updateAf += 1
 		} else {
-			m[p] = &Size{"", s}
+			m[p] = &SizeAndDateModified{0, time.Time{}, s, time.Time{}}
 			addAf += 1
 		}
 	}
@@ -342,9 +350,9 @@ func updateDestMapFromTempFileList(m map[string]*Size, rAf io.Reader) (map[strin
 // r で指定されたファイルから、チェック用のマップを生成する。
 // r の1行は次の構成。
 // 0:          1:               2:      3:              4:                                           5:
-// "ファイル名","更新日 更新時刻","更新者","ファイルサイズ","ファイル区分(フォルダ=Folder、ファイル=File)","格納フォルダのパス"
-func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*Size, error) {
-	m := make(map[string]*Size)
+// "ファイル名","更新日 更新時刻(YYYY/MM/MM h:mm:dd)","更新者","ファイルサイズ","ファイル区分(フォルダ=Folder、ファイル=File)","格納フォルダのパス"
+func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*SizeAndDateModified, error) {
+	m := make(map[string]*SizeAndDateModified)
 	var read, skip, add uint
 	const SD = "Shared Documents"
 
@@ -379,9 +387,16 @@ func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*Siz
 		path := p + pathAndFile[startIndex:]
 
 		// ファイルサイズ
-		size := strings.Replace(ary[3], "\"", "", -1) // "を削除
+		size, _ := strconv.Atoi(strings.Replace(ary[3], "\"", "", -1)) // "を削除
 
-		m[path] = &Size{size, ""}
+		// 更新日時("YYYY/MM/MM h:mm:dd")
+		d, err := time.Parse("2006/01/02 15:04:05", strings.Replace(ary[1], "\"", "", -1))
+		if err != nil {
+			return nil, err
+		}
+		d = d.Add(9 * time.Hour) // 9時間加算
+
+		m[path] = &SizeAndDateModified{size, d, 0, time.Time{}}
 
 		add += 1
 	}
@@ -428,10 +443,10 @@ func generateSourceFromPJFileList(r io.Reader, prifix, ignore string) <-chan Fil
 
 			// ファイルパスの作成。”で括られているので削除する。
 			aryP := ary[0:4]
-			size := ary[4]
+			size, _ := strconv.Atoi(ary[4])
 			path := p + strings.Replace(strings.Join(aryP, "/"), "\"", "", -1)
 
-			out <- File{path, size}
+			out <- File{path, size, time.Time{}}
 			add += 1
 		}
 
@@ -455,8 +470,8 @@ func generateSourceFromPJFileList(r io.Reader, prifix, ignore string) <-chan Fil
 
 // rで指定されたファイルを1行ずつ読み込み、File のチャネルを生成する。
 // rの1行の構成は次の通り。
-// 0:          1:                  2:               3:            4:                              5:     6:
-// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日,更新時刻
+// 0:          1:                  2:               3:            4:                              5:                 6:
+// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日(YYYY/MM/DD),更新時刻(hh:mm:dd)
 func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 	out := make(chan File, 50) // バッファ数50の根拠はなし
 
@@ -487,8 +502,14 @@ func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 
 			// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 			p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
+			d, err := time.Parse("2006/01/02 15:04:05", ary[5]+" "+ary[6])
+			if err != nil {
+				d = time.Time{}
+			}
 
-			out <- File{p, ary[3]}
+			size, _ := strconv.Atoi(ary[3])
+
+			out <- File{p, size, d}
 			add += 1
 		}
 
@@ -521,7 +542,7 @@ func modifySourcePathPrifix(s string) string {
 }
 
 // ワーカー
-func worker(fileCh <-chan File, destMap map[string]*Size, resultsCh chan<- Unmatch, compareMode int, wg *sync.WaitGroup) {
+func worker(fileCh <-chan File, destMap map[string]*SizeAndDateModified, resultsCh chan<- Unmatch, compareMode int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	// タスクがなくなってタスクのチェネルがcloseされるまで無限ループ
@@ -530,15 +551,29 @@ func worker(fileCh <-chan File, destMap map[string]*Size, resultsCh chan<- Unmat
 		msg := ""
 		if v, ok := destMap[f.path]; ok {
 			switch compareMode {
-			case compareModeEq:
-				if v.before != f.size && v.after != f.size {
+			case compareModeSizeEq:
+				if v.beforeSize != f.size && v.afterSize != f.size {
 					isExist = false
 					msg = UnmatchReasonSizeUnmatch
 				}
-			case compareModeGe:
-				if v.before < f.size {
+			case compareModeSizeGe:
+				if v.beforeSize < f.size {
 					isExist = false
 					msg = UnmatchReasonSizeShrink
+				}
+			case compareModeSizeGeAndModGe:
+				// 比較先のファイルサイズは、比較元のファイルサイズ以上であるのが正しい
+				if v.beforeSize < f.size {
+					fmt.Printf("比較元サイズ:%d, 比較先サイズ:%d\n", f.size, v.beforeSize)
+					isExist = false
+					msg = UnmatchReasonSizeShrink
+				} else {
+					// 比較先の更新日時は、比較元の更新日時より未来であるのが正しい
+					if v.beforeDateModified.Unix() <= f.dateModified.Unix() {
+						fmt.Printf("比較元更新日時:%s, 比較先更新日時:%s\n", f.dateModified.Format("2006/01/02 15:04:05"), v.beforeDateModified.Format("2006/01/02 15:04:05"))
+						isExist = false
+						msg = UnmatchReasonDateModifiedError
+					}
 				}
 			}
 		} else {
@@ -558,7 +593,7 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 	// 書き出し完了を表すチャネルをクローズする
 	defer close(done)
 
-	var write, nonexists, sizeunmatch uint
+	var write, nonexists, sizeunmatch, sizeshrink, dateModified uint
 
 	bw := bufio.NewWriter(w)
 	defer bw.Flush()
@@ -574,8 +609,10 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 			nonexists += 1
 		case UnmatchReasonSizeUnmatch:
 			sizeunmatch += 1
-		default:
-			sizeunmatch += 1
+		case UnmatchReasonSizeShrink:
+			sizeshrink += 1
+		case UnmatchReasonDateModifiedError:
+			dateModified += 1
 		}
 	}
 
@@ -584,6 +621,8 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 	fmt.Printf("　→出力件数 : %d\n", write)
 	fmt.Printf("　→ファイルなし : %d\n", nonexists)
 	fmt.Printf("　→サイズ不一致 : %d\n", sizeunmatch)
+	fmt.Printf("　→サイズ縮小 : %d\n", sizeshrink)
+	fmt.Printf("　→更新日時エラー : %d\n", dateModified)
 
 	return nil
 }
@@ -701,7 +740,7 @@ func opsIgnore(g *string) *cli.StringFlag {
 	}
 }
 
-func generateDestMapFromTempFileListPath(pathBefore, pathAfter string) (map[string]*Size, error) {
+func generateDestMapFromTempFileListPath(pathBefore, pathAfter string) (map[string]*SizeAndDateModified, error) {
 	// チェック先(処理前)のファイル
 	destBeFp, err := os.Open(pathBefore)
 	if err != nil {
@@ -733,7 +772,7 @@ func generateDestMapFromTempFileListPath(pathBefore, pathAfter string) (map[stri
 	return destMap, nil
 }
 
-func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]*Size, error) {
+func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]*SizeAndDateModified, error) {
 	// チェック先のファイル
 	destFp, err := os.Open(path)
 	if err != nil {
