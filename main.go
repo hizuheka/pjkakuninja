@@ -564,13 +564,13 @@ func worker(fileCh <-chan File, destMap map[string]*SizeAndDateModified, results
 			case compareModeSizeGeAndModGe:
 				// 比較先のファイルサイズは、比較元のファイルサイズ以上であるのが正しい
 				if v.beforeSize < f.size {
-					fmt.Printf("比較元サイズ:%d, 比較先サイズ:%d\n", f.size, v.beforeSize)
+					// fmt.Printf("比較元サイズ:%d, 比較先サイズ:%d\n", f.size, v.beforeSize)
 					isExist = false
 					msg = UnmatchReasonSizeShrink
 				} else {
 					// 比較先の更新日時は、比較元の更新日時より未来であるのが正しい
 					if v.beforeDateModified.Unix() <= f.dateModified.Unix() {
-						fmt.Printf("比較元更新日時:%s, 比較先更新日時:%s\n", f.dateModified.Format("2006/01/02 15:04:05"), v.beforeDateModified.Format("2006/01/02 15:04:05"))
+						// fmt.Printf("比較元更新日時:%s, 比較先更新日時:%s\n", f.dateModified.Format("2006/01/02 15:04:05"), v.beforeDateModified.Format("2006/01/02 15:04:05"))
 						isExist = false
 						msg = UnmatchReasonDateModifiedError
 					}
