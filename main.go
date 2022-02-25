@@ -33,6 +33,12 @@ type Unmatch struct {
 const (
 	UnmatchReasonNonExist    = "ファイルなし"
 	UnmatchReasonSizeUnmatch = "ファイルサイズ不一致"
+	UnmatchReasonSizeShrink  = "ファイルサイズ縮小"
+)
+
+const (
+	compareModeEq = iota
+	compareModeGe // 以上なら真
 )
 
 func main() {
@@ -91,7 +97,7 @@ func main() {
 					var wg sync.WaitGroup
 					for i := 0; i < newNumConcrent; i++ {
 						wg.Add(1)
-						go worker(sourceCh, destMap, resultsCh, &wg)
+						go worker(sourceCh, destMap, resultsCh, compareModeGe, &wg)
 					}
 					wg.Wait()
 
@@ -213,7 +219,7 @@ func main() {
 					var wg sync.WaitGroup
 					for i := 0; i < newNumConcrent; i++ {
 						wg.Add(1)
-						go worker(sourceCh, destMap, resultsCh, &wg)
+						go worker(sourceCh, destMap, resultsCh, compareModeGe, &wg)
 					}
 					wg.Wait()
 
@@ -515,7 +521,7 @@ func modifySourcePathPrifix(s string) string {
 }
 
 // ワーカー
-func worker(fileCh <-chan File, destMap map[string]*Size, resultsCh chan<- Unmatch, wg *sync.WaitGroup) {
+func worker(fileCh <-chan File, destMap map[string]*Size, resultsCh chan<- Unmatch, compareMode int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	// タスクがなくなってタスクのチェネルがcloseされるまで無限ループ
@@ -523,9 +529,17 @@ func worker(fileCh <-chan File, destMap map[string]*Size, resultsCh chan<- Unmat
 		isExist := true
 		msg := ""
 		if v, ok := destMap[f.path]; ok {
-			if v.before != f.size && v.after != f.size {
-				isExist = false
-				msg = UnmatchReasonSizeUnmatch
+			switch compareMode {
+			case compareModeEq:
+				if v.before != f.size && v.after != f.size {
+					isExist = false
+					msg = UnmatchReasonSizeUnmatch
+				}
+			case compareModeGe:
+				if v.before < f.size {
+					isExist = false
+					msg = UnmatchReasonSizeShrink
+				}
 			}
 		} else {
 			isExist = false
@@ -559,6 +573,8 @@ func writeUnMatchFile(resultsCh <-chan Unmatch, w io.Writer, done chan<- struct{
 		case UnmatchReasonNonExist:
 			nonexists += 1
 		case UnmatchReasonSizeUnmatch:
+			sizeunmatch += 1
+		default:
 			sizeunmatch += 1
 		}
 	}
