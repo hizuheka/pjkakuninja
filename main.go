@@ -45,11 +45,11 @@ const (
 const (
 	compareModeSizeEq         = iota // サイズ一致
 	compareModeSizeGe                // サイズ以上なら真
-	compareModeSizeGeAndModGe        // サイズ一致 & 更新日時未来
+	compareModeSizeGeAndModGe        // サイズ以上 & 更新日時未来
 )
 
 func main() {
-	var baseDir, source, dest, destAf, output, ignore string
+	var baseDir, source, dest, destAf, output, ignore, recovery, trimWord string
 	var numConcret, verbose int
 
 	app := &cli.App{
@@ -59,7 +59,7 @@ func main() {
 		Commands: []*cli.Command{
 			{
 				Name:    "check-temp",
-				Aliases: []string{"a"},
+				Aliases: []string{"ct"},
 				Usage:   "TEMPストレージのファイルマッチング",
 				Flags: []cli.Flag{
 					opsNumConcent(&numConcret),
@@ -182,7 +182,7 @@ func main() {
 			},
 			{
 				Name:    "check-spo",
-				Aliases: []string{"a"},
+				Aliases: []string{"cs"},
 				Usage:   "SPOのファイルマッチング",
 				Flags: []cli.Flag{
 					opsNumConcent(&numConcret),
@@ -235,6 +235,72 @@ func main() {
 
 					// writeUnMatchFile が完了するまで待機
 					<-done
+
+					return nil
+				},
+			},
+			{
+				Name:    "recovery-spo",
+				Aliases: []string{"r"},
+				Usage:   "SPOへの再送信",
+				Flags: []cli.Flag{
+					opsRecovery(&recovery),
+					opsOutput(&output),
+					opsTrimWord(&trimWord),
+				},
+				Action: func(c *cli.Context) error {
+					// リカバリリスト
+					recFp, err := os.Open(recovery)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer recFp.Close()
+
+					// チェック結果を出力するファイル。既にファイルが存在する場合は削除
+					outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer outFp.Close()
+
+					bw := bufio.NewWriter(outFp)
+					defer bw.Flush()
+
+					var read, write uint
+
+					s := bufio.NewScanner(recFp)
+					for s.Scan() {
+						read += 1
+
+						ary := strings.Split(s.Text(), ",")
+						if len(ary) != 2 {
+							return fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
+						}
+
+						filePath := ary[1]
+						dirPath := filePath[strings.Index(filePath, "/"):strings.LastIndex(filePath, "/")]
+						if trimWord != "" {
+							if !strings.HasPrefix(trimWord, "/") {
+								trimWord = "/" + trimWord
+							}
+							dirPath = strings.TrimPrefix(dirPath, trimWord)
+						}
+						AddPngCmd := fmt.Sprintf("Add-PnPFile -Path \"%s\" -Folder \"Shared%%20Documents%s\"\n", filePath, dirPath)
+
+						if _, err := bw.WriteString(AddPngCmd); err != nil {
+							return err
+						}
+						write += 1
+					}
+
+					if s.Err() != nil {
+						// non-EOF error.
+						return s.Err()
+					}
+
+					fmt.Println("◆リカバリファイル(RECOVERY_FILE_PATH)の出力を完了しました。")
+					fmt.Printf("　→ファイル入力件数 : %d\n", read)
+					fmt.Printf("　→ファイル出力件数 : %d\n", write)
 
 					return nil
 				},
@@ -737,6 +803,25 @@ func opsIgnore(g *string) *cli.StringFlag {
 		Aliases:     []string{"g"},
 		Usage:       "比較元ファイルのファイル名が `IGNORE` を含む場合、除外します。",
 		Destination: g,
+	}
+}
+
+func opsRecovery(r *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "recovery",
+		Aliases:     []string{"r"},
+		Usage:       "SPOへの再送信対象ファイルのリストののパス `RECOVERY_FILE_PATH` を指定します。",
+		Destination: r,
+		Required:    true,
+	}
+}
+
+func opsTrimWord(t *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "trim",
+		Aliases:     []string{"t"},
+		Usage:       "SPOへのアップロードパスを生成する際に先頭から除外する `TRIM WORD` を指定します。",
+		Destination: t,
 	}
 }
 
