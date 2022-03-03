@@ -285,7 +285,7 @@ func main() {
 							}
 							dirPath = strings.TrimPrefix(dirPath, trimWord)
 						}
-						AddPngCmd := fmt.Sprintf("Add-PnPFile -Path \"%s\" -Folder \"Shared%%20Documents%s\"\n", filePath, dirPath)
+						AddPngCmd := fmt.Sprintf("Add-PnPFile -Path \"%s\" -Folder \"Shared%%20Documents%s\"\n", strings.Replace(filePath, "$", "`$", -1), strings.Replace(dirPath, "$", "`$", -1))
 
 						if _, err := bw.WriteString(AddPngCmd); err != nil {
 							return err
@@ -344,7 +344,7 @@ func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*SizeAndDateModi
 		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
 		size, _ := strconv.Atoi(ary[3])
-		m[p] = &SizeAndDateModified{size, time.Time{}, 0, time.Time{}}
+		m[strings.ToLower(p)] = &SizeAndDateModified{size, time.Time{}, 0, time.Time{}}
 
 		addBe += 1
 	}
@@ -389,11 +389,11 @@ func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Rea
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
 		s, _ := strconv.Atoi(ary[3])
 
-		if v, ok := m[p]; ok {
+		if v, ok := m[strings.ToLower(p)]; ok {
 			v.afterSize = s
 			updateAf += 1
 		} else {
-			m[p] = &SizeAndDateModified{0, time.Time{}, s, time.Time{}}
+			m[strings.ToLower(p)] = &SizeAndDateModified{0, time.Time{}, s, time.Time{}}
 			addAf += 1
 		}
 	}
@@ -462,7 +462,8 @@ func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*Siz
 		}
 		d = d.Add(9 * time.Hour) // 9時間加算
 
-		m[path] = &SizeAndDateModified{size, d, 0, time.Time{}}
+		// SPOへアップロードすると大文字に（勝手に）変換される場合があるので、キーは小文字に変換する
+		m[strings.ToLower(path)] = &SizeAndDateModified{size, d, 0, time.Time{}}
 
 		add += 1
 	}
@@ -546,7 +547,7 @@ func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 	go func(br *bufio.Reader) {
 		defer close(out)
 
-		var read, dirSkip, ingSkip, add uint
+		var read, dirSkip, invalidSlip, ingSkip, add uint
 
 		scanner := bufio.NewScanner(br)
 		for scanner.Scan() {
@@ -557,6 +558,15 @@ func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 			// フォルダフラグが "TRUE" の場合はチェック対象外のためスキップする
 			if ary[4] == "TRUE" {
 				dirSkip += 1
+				continue
+			}
+
+			// ファイルサイズ
+			size, _ := strconv.Atoi(ary[3])
+
+			// ファイル名が「~$」で始まるファイル、かつ、200バイト未満は対象外のためスキップする
+			if strings.HasPrefix(ary[0], `"~$`) && size < 200 {
+				invalidSlip += 1
 				continue
 			}
 
@@ -572,8 +582,6 @@ func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 			if err != nil {
 				d = time.Time{}
 			}
-
-			size, _ := strconv.Atoi(ary[3])
 
 			out <- File{p, size, d}
 			add += 1
@@ -592,6 +600,7 @@ func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 		fmt.Printf("　→読み込み件数 : %d\n", read)
 		fmt.Printf("　→スキップ件数(フォルダ) : %d\n", dirSkip)
 		fmt.Printf("　→スキップ件数(無視ファイル) : %d\n", ingSkip)
+		fmt.Printf("　→スキップ件数(無効ファイル)： %d\n", invalidSlip)
 		fmt.Printf("　→検索対象ファイル件数 : %d\n", add)
 	}(b)
 
@@ -615,7 +624,7 @@ func worker(fileCh <-chan File, destMap map[string]*SizeAndDateModified, results
 	for f := range fileCh {
 		isExist := true
 		msg := ""
-		if v, ok := destMap[f.path]; ok {
+		if v, ok := destMap[strings.ToLower(f.path)]; ok {
 			switch compareMode {
 			case compareModeSizeEq:
 				if v.beforeSize != f.size && v.afterSize != f.size {
