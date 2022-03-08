@@ -104,7 +104,7 @@ func main() {
 					var wg sync.WaitGroup
 					for i := 0; i < newNumConcrent; i++ {
 						wg.Add(1)
-						go worker(sourceCh, destMap, resultsCh, compareModeSizeGe, &wg)
+						go worker(sourceCh, destMap, resultsCh, compareModeSizeEq, &wg)
 					}
 					wg.Wait()
 
