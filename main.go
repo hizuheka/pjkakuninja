@@ -565,7 +565,8 @@ func generateSourceFromTempFileList(r io.Reader, ignore string) <-chan File {
 			size, _ := strconv.Atoi(ary[3])
 
 			// ファイル名が「~$」で始まるファイル、かつ、200バイト未満は対象外のためスキップする
-			if strings.HasPrefix(ary[0], `"~$`) && size < 200 {
+			// Thumbs.db もスキップする
+			if (strings.HasPrefix(ary[0], `"~$`) && size < 200) || ary[0] == "\"Thumbs.db\"" {
 				invalidSlip += 1
 				continue
 			}
