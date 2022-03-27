@@ -305,6 +305,94 @@ func main() {
 					return nil
 				},
 			},
+			{
+				Name:    "dummy-temp-list",
+				Aliases: []string{"d"},
+				Usage:   "ダミーのテンポラリストレージファイルリスト作成",
+				Flags: []cli.Flag{
+					opsSource(&source),
+					opsOutput(&output),
+					opsDestNonRequired(&dest),
+					opsDestAf(&destAf),
+					opsBaseDir(&baseDir),
+				},
+				Action: func(c *cli.Context) error {
+					// PJWEBリスト
+					srcFp, err := os.Open(source)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer srcFp.Close()
+
+					// チェック結果を出力するファイル。既にファイルが存在する場合は削除
+					outFp, err := os.OpenFile(output, os.O_CREATE|os.O_TRUNC, 0644)
+					if err != nil {
+						return cli.Exit(err, 1)
+					}
+					defer outFp.Close()
+
+					bw := bufio.NewWriter(outFp)
+					defer bw.Flush()
+
+					// チェック先ファイルからチェック用のハッシュマップを生成する
+					var destMap map[string]*SizeAndDateModified
+					if dest != "" {
+						destMap, err = generateDestMapFromTempFileListPath(dest, destAf)
+						if err != nil {
+							return cli.Exit(err, 1)
+						}
+					}
+
+					var read, write uint
+
+					// "プロジェクト名","カテゴリ","サブカテゴリ",ファイルパス,ファイルサイズ
+					s := bufio.NewScanner(srcFp)
+					for s.Scan() {
+						read += 1
+
+						ary := strings.Split(s.Text(), ",")
+						if len(ary) != 5 {
+							return fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
+						}
+
+						// ファイルパスの作成。”で括られているので削除する。
+						aryP := ary[0:4]
+						path := baseDir + strings.Replace(strings.Join(aryP, "/"), "\"", "", -1)
+						filename := filepath.Base(path)
+						extname := filepath.Ext(path)
+						size := ary[4]
+						updateDate := ""
+						updateTime := ""
+						if v, ok := destMap[path]; ok {
+							if v.beforeSize != 0 {
+								updateDate = v.beforeDateModified.Format("2006/01/02")
+								updateTime = v.beforeDateModified.Format("15:04:05")
+							} else {
+								updateDate = v.afterDateModified.Format("2006/01/02")
+								updateTime = v.afterDateModified.Format("15:04:05")
+							}
+						}
+
+						// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日(YYYY/MM/DD),更新時刻(hh:mm:dd)
+						out := fmt.Sprintf("\"%s\",\"%s\",\"%s\",%s,TRUE,%s,%s", filename, path, extname, size, updateDate, updateTime)
+						if _, err := bw.WriteString(out); err != nil {
+							return err
+						}
+						write += 1
+					}
+
+					if s.Err() != nil {
+						// non-EOF error.
+						return s.Err()
+					}
+
+					fmt.Println("◆リカバリファイル(RECOVERY_FILE_PATH)の出力を完了しました。")
+					fmt.Printf("　→ファイル入力件数 : %d\n", read)
+					fmt.Printf("　→ファイル出力件数 : %d\n", write)
+
+					return nil
+				},
+			},
 		},
 	}
 
@@ -788,6 +876,14 @@ func opsDest(d *string) *cli.StringFlag {
 	}
 }
 
+func opsDestNonRequired(d *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "dest",
+		Aliases:     []string{"d"},
+		Usage:       "比較先ファルのパス `DEST_FILE_PATH` を指定します。",
+		Destination: d,
+	}
+}
 func opsDestAf(d *string) *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:        "destAf",
