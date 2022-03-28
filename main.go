@@ -357,13 +357,13 @@ func main() {
 
 						// ファイルパスの作成。”で括られているので削除する。
 						aryP := ary[0:4]
-						path := baseDir + strings.Replace(strings.Join(aryP, "/"), "\"", "", -1)
+						path := modifySourcePathPrifix(baseDir) + strings.Replace(strings.Join(aryP, "/"), "\"", "", -1)
 						filename := filepath.Base(path)
-						extname := filepath.Ext(path)
+						extname := strings.TrimLeft(filepath.Ext(path), ".")
 						size := ary[4]
-						updateDate := ""
-						updateTime := ""
-						if v, ok := destMap[path]; ok {
+						updateDate := "2022/3/5"
+						updateTime := "15:04:05"
+						if v, ok := destMap[strings.ToLower(path)]; ok {
 							if v.beforeSize != 0 {
 								updateDate = v.beforeDateModified.Format("2006/01/02")
 								updateTime = v.beforeDateModified.Format("15:04:05")
@@ -374,7 +374,7 @@ func main() {
 						}
 
 						// "ファイル名","ファイルのフルパス","ファイルの拡張子",ファイルサイズ,フォルダフラグ(フォルダの場合TRUE),更新日(YYYY/MM/DD),更新時刻(hh:mm:dd)
-						out := fmt.Sprintf("\"%s\",\"%s\",\"%s\",%s,TRUE,%s,%s", filename, path, extname, size, updateDate, updateTime)
+						out := fmt.Sprintf("\"%s\",\"%s\",\"%s\",%s,FALSE,%s,%s\r\n", filename, strings.Replace(path, "/", "\\", -1), extname, size, updateDate, updateTime)
 						if _, err := bw.WriteString(out); err != nil {
 							return err
 						}
@@ -432,7 +432,12 @@ func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*SizeAndDateModi
 		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
 		size, _ := strconv.Atoi(ary[3])
-		m[strings.ToLower(p)] = &SizeAndDateModified{size, time.Time{}, 0, time.Time{}}
+		d, err := time.Parse("2006/01/02 15:04:05", ary[5]+" "+ary[6])
+		if err != nil {
+			d = time.Time{}
+		}
+		m[strings.ToLower(p)] = &SizeAndDateModified{size, d, 0, time.Time{}}
+		// m[strings.ToLower(p)] = &SizeAndDateModified{size, time.Time{}, 0, time.Time{}}
 
 		addBe += 1
 	}
@@ -476,12 +481,17 @@ func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Rea
 		// ファイルパスが”で括られているので削除する。 パスの区切りは「/」とする
 		p := filepath.ToSlash(strings.Replace(ary[1], "\"", "", -1))
 		s, _ := strconv.Atoi(ary[3])
+		d, err := time.Parse("2006/01/02 15:04:05", ary[5]+" "+ary[6])
+		if err != nil {
+			d = time.Time{}
+		}
 
 		if v, ok := m[strings.ToLower(p)]; ok {
 			v.afterSize = s
+			v.afterDateModified = d
 			updateAf += 1
 		} else {
-			m[strings.ToLower(p)] = &SizeAndDateModified{0, time.Time{}, s, time.Time{}}
+			m[strings.ToLower(p)] = &SizeAndDateModified{0, time.Time{}, s, d}
 			addAf += 1
 		}
 	}
