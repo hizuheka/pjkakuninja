@@ -366,10 +366,18 @@ func main() {
 						if v, ok := destMap[strings.ToLower(path)]; ok {
 							if v.beforeSize != 0 {
 								updateDate = v.beforeDateModified.Format("2006/01/02")
-								updateTime = v.beforeDateModified.Format("15:04:05")
-							} else {
+								if v.beforeDateModified.Hour() < 12 {
+									updateTime = v.beforeDateModified.Format("3:04:05")
+								} else {
+									updateTime = v.beforeDateModified.Format("15:04:05")
+								}
+							} else if v.afterSize != 0 {
 								updateDate = v.afterDateModified.Format("2006/01/02")
-								updateTime = v.afterDateModified.Format("15:04:05")
+								if v.beforeDateModified.Hour() < 12 {
+									updateTime = v.afterDateModified.Format("3:04:05")
+								} else {
+									updateTime = v.afterDateModified.Format("15:04:05")
+								}
 							}
 						}
 
