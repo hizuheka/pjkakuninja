@@ -49,7 +49,7 @@ const (
 )
 
 func main() {
-	var baseDir, source, dest, destAf, output, ignore, recovery, trimWord string
+	var baseDir, source, dest, destAf, output, ignore, recovery, spopath, trimWord string
 	var numConcret, verbose int
 
 	app := &cli.App{
@@ -247,6 +247,7 @@ func main() {
 					opsRecovery(&recovery),
 					opsOutput(&output),
 					opsTrimWord(&trimWord),
+					opsSpopath(&spopath),
 				},
 				Action: func(c *cli.Context) error {
 					// リカバリリスト
@@ -285,6 +286,13 @@ func main() {
 							}
 							dirPath = strings.TrimPrefix(dirPath, trimWord)
 						}
+						if spopath != "" {
+							if !strings.HasPrefix(spopath, "/") {
+								spopath = "/" + spopath
+							}
+							dirPath = fmt.Sprintf("%s%s", spopath, dirPath)
+						}
+
 						AddPngCmd := fmt.Sprintf("Add-PnPFile -Path \"%s\" -Folder \"Shared%%20Documents%s\"\n", strings.Replace(filePath, "$", "`$", -1), strings.Replace(dirPath, "$", "`$", -1))
 
 						if _, err := bw.WriteString(AddPngCmd); err != nil {
@@ -544,7 +552,7 @@ func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*Siz
 
 		ary := strings.Split(s.Text(), ",")
 		if len(ary) != 6 {
-			return nil, fmt.Errorf("ファイルリストのフォーマット不正. len=%d", len(ary))
+			return nil, fmt.Errorf("ファイルリストのフォーマット不正. len=%d, line=%s", len(ary), s.Text())
 		}
 
 		// ファイル区分が "Folder" の場合はチェック対象外のためスキップする
@@ -937,6 +945,15 @@ func opsRecovery(r *string) *cli.StringFlag {
 		Usage:       "SPOへの再送信対象ファイルのリストののパス `RECOVERY_FILE_PATH` を指定します。",
 		Destination: r,
 		Required:    true,
+	}
+}
+
+func opsSpopath(s *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "spopath",
+		Aliases:     []string{"p"},
+		Usage:       "SPOへアップロードパス `SPO_PATH` を指定します。",
+		Destination: s,
 	}
 }
 
