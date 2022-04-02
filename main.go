@@ -24,10 +24,10 @@ type File struct {
 }
 
 type SizeAndDateModified struct {
-	beforeSize         int
-	beforeDateModified time.Time
-	afterSize          int
-	afterDateModified  time.Time
+	Size            int
+	DateModified    time.Time
+	SizeOld         int
+	DateModifiedOld time.Time
 }
 
 type Unmatch struct {
@@ -49,7 +49,7 @@ const (
 )
 
 func main() {
-	var baseDir, source, dest, destAf, output, ignore, recovery, spopath, trimWord string
+	var baseDir, source, dest, destOld, output, ignore, recovery, spopath, trimWord string
 	var numConcret, verbose int
 
 	app := &cli.App{
@@ -66,7 +66,7 @@ func main() {
 					opsBaseDir(&baseDir),
 					opsSource(&source),
 					opsDest(&dest),
-					opsDestAf(&destAf),
+					opsDestOld(&destOld),
 					opsOutput(&output),
 					opsIgnore(&ignore),
 				},
@@ -84,7 +84,7 @@ func main() {
 					go writeUnMatchFile(resultsCh, outFp, done)
 
 					// チェック先ファイルからチェック用のハッシュマップを生成する
-					destMap, err := generateDestMapFromTempFileListPath(dest, destAf)
+					destMap, err := generateDestMapFromTempFileListPath(dest, destOld)
 					if err != nil {
 						return cli.Exit(err, 1)
 					}
@@ -321,7 +321,7 @@ func main() {
 					opsSource(&source),
 					opsOutput(&output),
 					opsDestNonRequired(&dest),
-					opsDestAf(&destAf),
+					opsDestOld(&destOld),
 					opsBaseDir(&baseDir),
 				},
 				Action: func(c *cli.Context) error {
@@ -345,7 +345,7 @@ func main() {
 					// チェック先ファイルからチェック用のハッシュマップを生成する
 					var destMap map[string]*SizeAndDateModified
 					if dest != "" {
-						destMap, err = generateDestMapFromTempFileListPath(dest, destAf)
+						destMap, err = generateDestMapFromTempFileListPath(dest, destOld)
 						if err != nil {
 							return cli.Exit(err, 1)
 						}
@@ -372,19 +372,19 @@ func main() {
 						updateDate := "2022/3/5"
 						updateTime := "15:04:05"
 						if v, ok := destMap[strings.ToLower(path)]; ok {
-							if v.beforeSize != 0 {
-								updateDate = v.beforeDateModified.Format("2006/01/02")
-								if v.beforeDateModified.Hour() < 12 {
-									updateTime = v.beforeDateModified.Format("3:04:05")
+							if v.SizeOld != 0 {
+								updateDate = v.DateModifiedOld.Format("2006/01/02")
+								if v.DateModifiedOld.Hour() < 12 {
+									updateTime = v.DateModifiedOld.Format("3:04:05")
 								} else {
-									updateTime = v.beforeDateModified.Format("15:04:05")
+									updateTime = v.DateModifiedOld.Format("15:04:05")
 								}
-							} else if v.afterSize != 0 {
-								updateDate = v.afterDateModified.Format("2006/01/02")
-								if v.beforeDateModified.Hour() < 12 {
-									updateTime = v.afterDateModified.Format("3:04:05")
+							} else {
+								updateDate = v.DateModified.Format("2006/01/02")
+								if v.DateModified.Hour() < 12 {
+									updateTime = v.DateModified.Format("3:04:05")
 								} else {
-									updateTime = v.afterDateModified.Format("15:04:05")
+									updateTime = v.DateModified.Format("15:04:05")
 								}
 							}
 						}
@@ -472,7 +472,7 @@ func generateDestMapFromTempFileList(rBe io.Reader) (map[string]*SizeAndDateModi
 }
 
 func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Reader) (map[string]*SizeAndDateModified, error) {
-	var readAf, skipAf, addAf, updateAf uint
+	var readAf, skipAf, updateAf uint
 
 	// 処理後ファイル
 	sAf := bufio.NewScanner(rAf)
@@ -503,12 +503,9 @@ func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Rea
 		}
 
 		if v, ok := m[strings.ToLower(p)]; ok {
-			v.afterSize = s
-			v.afterDateModified = d
+			v.SizeOld = s
+			v.DateModifiedOld = d
 			updateAf += 1
-		} else {
-			m[strings.ToLower(p)] = &SizeAndDateModified{0, time.Time{}, s, d}
-			addAf += 1
 		}
 	}
 
@@ -518,10 +515,9 @@ func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Rea
 	}
 
 	// ファイル読み込み結果を出力
-	fmt.Println("◆チェック先ファイル(処理後)(DEST_FILE_AFTER_PATH)の読み込みを完了しました。")
+	fmt.Println("◆チェック先ファイル(秘密度前)(DEST_FILE_OLD_PATH)の読み込みを完了しました。")
 	fmt.Printf("　→ファイル読み込み件数 : %d\n", readAf)
 	fmt.Printf("　→更新件数 : %d\n", updateAf)
-	fmt.Printf("　→追加件数 : %d\n", addAf)
 	fmt.Printf("　→スキップ件数(ディレクトリ) : %d\n", skipAf)
 
 	return m, nil
@@ -742,24 +738,24 @@ func worker(fileCh <-chan File, destMap map[string]*SizeAndDateModified, results
 		if v, ok := destMap[strings.ToLower(f.path)]; ok {
 			switch compareMode {
 			case compareModeSizeEq:
-				if v.beforeSize != f.size && v.afterSize != f.size {
+				if v.Size != f.size && v.SizeOld != f.size {
 					isExist = false
 					msg = UnmatchReasonSizeUnmatch
 				}
 			case compareModeSizeGe:
-				if v.beforeSize < f.size {
+				if v.Size < f.size {
 					isExist = false
 					msg = UnmatchReasonSizeShrink
 				}
 			case compareModeSizeGeAndModGe:
 				// 比較先のファイルサイズは、比較元のファイルサイズ以上であるのが正しい
-				if v.beforeSize < f.size {
+				if v.Size < f.size {
 					// fmt.Printf("比較元サイズ:%d, 比較先サイズ:%d\n", f.size, v.beforeSize)
 					isExist = false
 					msg = UnmatchReasonSizeShrink
 				} else {
 					// 比較先の更新日時は、比較元の更新日時より未来であるのが正しい
-					if v.beforeDateModified.Unix() <= f.dateModified.Unix() {
+					if v.DateModified.Unix() <= f.dateModified.Unix() {
 						// fmt.Printf("比較元更新日時:%s, 比較先更新日時:%s\n", f.dateModified.Format("2006/01/02 15:04:05"), v.beforeDateModified.Format("2006/01/02 15:04:05"))
 						isExist = false
 						msg = UnmatchReasonDateModifiedError
@@ -910,7 +906,7 @@ func opsDestNonRequired(d *string) *cli.StringFlag {
 		Destination: d,
 	}
 }
-func opsDestAf(d *string) *cli.StringFlag {
+func opsDestOld(d *string) *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:        "destAf",
 		Aliases:     []string{"a"},
@@ -982,14 +978,14 @@ func generateDestMapFromTempFileListPath(pathBefore, pathAfter string) (map[stri
 
 	// チェック先(処理後)のファイル
 	if pathAfter != "" {
-		var destAfFp *os.File
-		destAfFp, err := os.Open(pathAfter)
+		var destOldFp *os.File
+		destOldFp, err := os.Open(pathAfter)
 		if err != nil {
 			return nil, err
 		}
-		defer destAfFp.Close()
+		defer destOldFp.Close()
 
-		destMap, err = updateDestMapFromTempFileList(destMap, destAfFp)
+		destMap, err = updateDestMapFromTempFileList(destMap, destOldFp)
 		if err != nil {
 			return nil, err
 		}
