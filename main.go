@@ -49,7 +49,7 @@ const (
 )
 
 func main() {
-	var baseDir, source, dest, destOld, output, ignore, recovery, spopath, trimWord string
+	var baseDir, spoDir, source, dest, destOld, output, ignore, recovery, spopath, trimWord string
 	var numConcret, verbose int
 
 	app := &cli.App{
@@ -187,6 +187,7 @@ func main() {
 				Flags: []cli.Flag{
 					opsNumConcent(&numConcret),
 					opsBaseDir(&baseDir),
+					opsSPODir(&spoDir),
 					opsSource(&source),
 					opsDest(&dest),
 					opsOutput(&output),
@@ -206,7 +207,7 @@ func main() {
 					go writeUnMatchFile(resultsCh, outFp, done)
 
 					// チェック先ファイルからチェック用のハッシュマップを生成する
-					destMap, err := generateDestMapFromSPOFileListPath(dest, baseDir)
+					destMap, err := generateDestMapFromSPOFileListPath(dest, baseDir, spoDir)
 					if err != nil {
 						return cli.Exit(err, 1)
 					}
@@ -527,10 +528,9 @@ func updateDestMapFromTempFileList(m map[string]*SizeAndDateModified, rAf io.Rea
 // r の1行は次の構成。
 // 0:          1:               2:      3:              4:                                           5:
 // "ファイル名","更新日 更新時刻(YYYY/MM/MM h:mm:dd)","更新者","ファイルサイズ","ファイル区分(フォルダ=Folder、ファイル=File)","格納フォルダのパス"
-func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*SizeAndDateModified, error) {
+func generateDestMapFromSPOFileList(r io.Reader, prifix, sd string) (map[string]*SizeAndDateModified, error) {
 	m := make(map[string]*SizeAndDateModified)
 	var read, skip, add uint
-	const SD = "Shared Documents"
 
 	p := modifySourcePathPrifix(prifix)
 
@@ -559,8 +559,7 @@ func generateDestMapFromSPOFileList(r io.Reader, prifix string) (map[string]*Siz
 
 		// ファイルパスの生成
 		pathAndFile := strings.Replace(ary[5]+"/"+ary[0], "\"", "", -1) // "を削除
-		startIndex := strings.Index(pathAndFile, SD) + len(SD) + 1
-		path := p + pathAndFile[startIndex:]
+		path := p + strings.Replace(pathAndFile, sd, "", -1)
 
 		// ファイルサイズ
 		size, _ := strconv.Atoi(strings.Replace(ary[3], "\"", "", -1)) // "を削除
@@ -878,6 +877,17 @@ func opsBaseDir(b *string) *cli.StringFlag {
 	}
 
 }
+
+func opsSPODir(b *string) *cli.StringFlag {
+	return &cli.StringFlag{
+		Name:        "spoDir",
+		Aliases:     []string{"q"},
+		Usage:       "SPOのフォルダパス `SPO_DIR` を指定します。",
+		Destination: b,
+		Required:    true,
+	}
+}
+
 func opsSource(s *string) *cli.StringFlag {
 	return &cli.StringFlag{
 		Name:        "source",
@@ -994,7 +1004,7 @@ func generateDestMapFromTempFileListPath(pathBefore, pathAfter string) (map[stri
 	return destMap, nil
 }
 
-func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]*SizeAndDateModified, error) {
+func generateDestMapFromSPOFileListPath(path, prefix, sd string) (map[string]*SizeAndDateModified, error) {
 	// チェック先のファイル
 	destFp, err := os.Open(path)
 	if err != nil {
@@ -1003,7 +1013,7 @@ func generateDestMapFromSPOFileListPath(path, prefix string) (map[string]*SizeAn
 	defer destFp.Close()
 
 	// チェック先ファイルからチェック用のハッシュマップを生成する
-	destMap, err := generateDestMapFromSPOFileList(destFp, prefix)
+	destMap, err := generateDestMapFromSPOFileList(destFp, prefix, sd)
 	if err != nil {
 		return nil, err
 	}
